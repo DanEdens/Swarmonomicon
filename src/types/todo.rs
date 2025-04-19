@@ -164,51 +164,27 @@ impl TodoList {
 
         // Only attempt AI enhancement if a client is provided
         if let Some(ai_client) = ai_client {
-            let system_prompt = r#"You are a task enhancement system. Enhance the given task description by:
-1. Adding specific technical details
-2. Explaining impact and scope
-3. Including relevant components/systems
-4. Making it more comprehensive
-5. Keeping it concise
-
-Output ONLY the enhanced description, no other text."#;
-
-            let messages = vec![HashMap::from([
-                ("role".to_string(), "user".to_string()),
-                ("content".to_string(), format!("Enhance this task: {}", description)),
-            ])];
-
-            if let Ok(enhanced) = ai_client.chat(system_prompt, messages).await {
-                task.enhanced_description = Some(enhanced);
-            }
-            
-            // If no project was provided, try to predict one using AI
-            if task.project.is_none() {
-                // Only attempt project prediction if description enhancement worked
-                if task.enhanced_description.is_some() {
-                    let project_prompt = r#"You are a project classifier. Your task is to determine which project a given task belongs to.
-Your output should be ONLY the project name, nothing else.
-If you're unsure, respond with "madness_interactive"."#;
-
-                    let project_messages = vec![HashMap::from([
-                        ("role".to_string(), "user".to_string()),
-                        ("content".to_string(), format!("Which project does this task belong to? {}", description)),
-                    ])];
-
-                    if let Ok(project_name) = ai_client.chat(project_prompt, project_messages).await {
-                        // Clean up project name
-                        let project = project_name.trim().trim_matches('"').trim_matches('\'');
-                        if !project.is_empty() {
-                            task.project = Some(project.to_string());
-                        }
-                    }
+            // Use the shared enhancement logic from our AI module
+            if let Ok((enhanced_desc, predicted_priority, predicted_project)) = 
+                crate::ai::enhance_todo_description(&description, ai_client).await {
+                
+                task.enhanced_description = Some(enhanced_desc);
+                
+                // Only override priority if none was explicitly set or if predicted is higher
+                if task.priority < predicted_priority {
+                    task.priority = predicted_priority;
                 }
                 
-                // Set default project if prediction failed or wasn't attempted
+                // Only use predicted project if none was provided
                 if task.project.is_none() {
-                    task.project = Some("madness_interactive".to_string());
+                    task.project = Some(predicted_project);
                 }
             }
+        }
+        
+        // Ensure we have a default project if none was set
+        if task.project.is_none() {
+            task.project = Some(get_default_project().to_string());
         }
 
         self.add_task(task.clone()).await?;

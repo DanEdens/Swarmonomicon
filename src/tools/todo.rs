@@ -73,184 +73,19 @@ impl TodoTool {
     // }
 
     async fn predict_project(&self, description: &str) -> Result<String> {
-        tracing::debug!("Attempting to predict project for task: {}", description);
+        let (_, _, project) = crate::ai::enhance_todo_description(
+            description, 
+            self.ai_client.as_ref().as_ref()
+        ).await?;
         
-        // Get project descriptions to provide to the AI
-        let project_descriptions = projects::get_project_descriptions_text();
-        
-        let system_prompt = format!(r#"You are a project classification system. Your task is to determine which project a given task belongs to.
-
-Below is a list of available projects with descriptions:
-{}
-
-RULES:
-1. Output MUST be ONLY the name of the project, nothing else
-2. Choose the MOST SPECIFIC project that relates to the task description
-3. If you cannot determine a specific project, use "{}" as the default
-4. Consider keywords, technical terms, and context in the task description
-5. Do NOT explain your reasoning or add any other text - ONLY output the project name
-
-Examples:
-"Update the README for Swarmonomicon with new API docs" -> "Swarmonomicon"
-"Fix MQTT connection issue in the get-var utility" -> "mqtt-get-var"
-"Create a new Hammerspoon hotkey for window management" -> ".hammerspoon"
-"Refactor regex handling in the RegressionTestKit" -> "regressiontestkit"
-"Add task priority system" -> "madness_interactive"
-"#, project_descriptions, projects::get_default_project());
-
-        let messages = vec![HashMap::from([
-            ("role".to_string(), "user".to_string()),
-            ("content".to_string(), format!(
-                "Task description: '{}'\nWhich project does this task belong to?",
-                description
-            )),
-        ])];
-
-        match self.ai_client.chat(&system_prompt, messages).await {
-            Ok(project_name) => {
-                // Clean up the response - remove any quotes, whitespace, etc.
-                let cleaned_project = project_name.trim().trim_matches('"').trim_matches('\'').to_string();
-                tracing::debug!("AI predicted project: {}", cleaned_project);
-                Ok(cleaned_project)
-            },
-            Err(e) => {
-                tracing::warn!("Failed to predict project with AI: {}", e);
-                Ok(projects::get_default_project().to_string())
-            }
-        }
+        Ok(project)
     }
 
     async fn enhance_with_ai(&self, description: &str) -> Result<(String, TaskPriority, String)> {
-        tracing::debug!("Attempting to enhance description with AI: {}", description);
-
-        // Step 1: Enhance the task description and attempt JSON formatting
-        let system_prompt = r#"You are a task enhancement system that ONLY outputs JSON.
-
-RULES:
-1. Output MUST be a single JSON object
-2. JSON MUST have exactly two fields: "description" and "priority"
-3. "priority" MUST be one of: "high", "medium", "low" (lowercase)
-4. NO other text before or after the JSON
-5. The description MUST be significantly enhanced:
-   - Add specific technical details
-   - Explain the impact and scope
-   - Include any relevant components or systems
-   - Make it at least 2x longer than the input if this supports details
-   - Keep it concise but comprehensive
-
-STRICT PRIORITY RULES:
-"high" MUST be used if the task contains ANY of:
-- security/vulnerability/exploit
-- critical/severe/major
-- crash/data loss
-- blocking/broken/emergency
-- authentication/authorization issues
-
-"medium" MUST be used if the task contains ANY of:
-- feature/enhancement
-- documentation/readme
-- improvement/update
-- non-critical fix
-
-"low" MUST be used if the task contains ANY of:
-- style/formatting
-- minor/cosmetic
-- optional/nice-to-have
-- cleanup/refactor
-
-If multiple rules match, use the highest priority that matches.
-
-Example Input: "fix login bug"
-Example Output: {"description":"Investigate and resolve authentication system malfunction affecting user login process, verify session management, and ensure proper error handling","priority":"medium"}
-
-Example Input: "fix security vulnerability"
-Example Output: {"description":"Address critical security vulnerability in authentication system that could allow unauthorized access, implement proper input validation, and update encryption protocols","priority":"high"}"#;
-
-        let messages = vec![HashMap::from([
-            ("role".to_string(), "user".to_string()),
-            ("content".to_string(), format!(
-                "Task: '{}'\nOutput a JSON object with enhanced description and priority following the STRICT rules exactly.",
-                description
-            )),
-        ])];
-
-        let first_attempt = self.ai_client.chat(system_prompt, messages).await?;
-        println!("First AI attempt:\n{}", first_attempt);
-
-        // Step 2: Clean and format the JSON properly
-        let json_cleaner_prompt = r#"You are a JSON cleaning system. Your ONLY job is to output a valid JSON object.
-
-STRICT RULES:
-1. Output MUST be ONLY the JSON object itself
-2. NO markdown formatting (no ```json or ``` markers)
-3. NO explanatory text before or after
-4. NO newlines before or after the JSON
-5. JSON MUST have exactly these fields:
-   - "description": string
-   - "priority": string (one of: "high", "medium", "low")
-
-If input contains JSON-like content:
-- Extract and fix it
-- Ensure it has the required fields
-- Return ONLY the fixed JSON
-
-If NO valid JSON found:
-Return this exact format:
-{"description":"INPUT_TEXT","priority":"medium"}
-
-Example input: "Here's my response: {'desc': 'fix bug', 'priority': 'high'}"
-Example output: {"description":"fix bug","priority":"high"}"#;
-
-        let cleaning_messages = vec![HashMap::from([
-            ("role".to_string(), "user".to_string()),
-            ("content".to_string(), format!(
-                "Clean and format this into proper JSON:\n{}",
-                first_attempt
-            )),
-        ])];
-
-        let cleaned_json = self.ai_client.chat(json_cleaner_prompt, cleaning_messages).await?;
-        println!("Cleaned JSON attempt:\n{}", cleaned_json);
-
-        // Step 3: Predict the project in parallel with description enhancement
-        let project_future = self.predict_project(description);
-
-        // Parse the cleaned JSON
-        let (enhanced_desc, priority) = match serde_json::from_str::<Value>(&cleaned_json) {
-            Ok(enhanced) => {
-                let enhanced_desc = enhanced["description"]
-                    .as_str()
-                    .unwrap_or(description)
-                    .to_string();
-
-                let priority = match enhanced["priority"].as_str().unwrap_or("medium") {
-                    "high" => TaskPriority::High,
-                    "low" => TaskPriority::Low,
-                    _ => TaskPriority::Medium,
-                };
-
-                println!("Final enhanced description: {}", enhanced_desc);
-                println!("Final priority: {:?}", priority);
-                tracing::debug!("Successfully enhanced description: {} with priority: {:?}", enhanced_desc, priority);
-                (enhanced_desc, priority)
-            }
-            Err(e) => {
-                println!("Failed to parse cleaned JSON, falling back to defaults");
-                tracing::warn!("Failed to parse cleaned JSON: {}", e);
-                (description.to_string(), TaskPriority::Medium)
-            }
-        };
-
-        // Wait for project prediction and get result
-        let project = match project_future.await {
-            Ok(project) => project,
-            Err(e) => {
-                tracing::warn!("Failed to predict project: {}", e);
-                projects::get_default_project().to_string()
-            }
-        };
-
-        Ok((enhanced_desc, priority, project))
+        tracing::debug!("Enhancing todo description with AI: {}", description);
+        
+        // Use the shared enhancement function
+        crate::ai::enhance_todo_description(description, self.ai_client.as_ref().as_ref()).await
     }
 
     async fn add_todo(&self, description: &str, context: Option<&str>, target_agent: &str, project: Option<&str>) -> Result<String> {

@@ -4,6 +4,9 @@ use anyhow::Result;
 use std::path::Path;
 use std::hash::Hash;
 
+pub mod config;
+pub use config::{TrainingConfig, TrainingMetrics, TrainingHistory};
+
 pub const MODEL_VERSION: &str = "1.0.0";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

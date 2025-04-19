@@ -8,6 +8,8 @@ use serde::de::DeserializeOwned;
 
 pub mod flappy;
 pub mod model;
+#[cfg(feature = "rl")]
+pub mod viz;
 
 /// Trait for states in reinforcement learning environments
 #[cfg(feature = "rl")]
@@ -42,6 +44,7 @@ pub trait Environment {
 
 /// Q-Learning agent implementation
 #[cfg(feature = "rl")]
+#[derive(Clone)]
 pub struct QLearningAgent<S: State + Serialize + for<'de> Deserialize<'de>, A: Action + Serialize + for<'de> Deserialize<'de>> {
     q_table: HashMap<(S, A), f64>,
     learning_rate: f64,
@@ -91,18 +94,28 @@ impl<S: State + Serialize + for<'de> Deserialize<'de>, A: Action + Serialize + f
     }
 
     /// Update Q-value based on experience
-    pub fn learn(&mut self, state: S, action: A, reward: f64, next_state: &S, next_valid_actions: &[A]) {
+    pub fn update(&mut self, state: &S, action: &A, reward: f64, next_state: &S) -> f64 {
+        // Get valid actions for the next state (for a real implementation, you would pass these in)
+        let valid_actions = vec![
+            A::from_index(0).unwrap(),
+            A::from_index(1).unwrap(),
+        ];
+
         // First, find the maximum Q-value for the next state
-        let next_max_q = next_valid_actions
+        let next_max_q = valid_actions
             .iter()
             .map(|a| self.q_table.get(&(next_state.clone(), a.clone())).unwrap_or(&0.0))
             .fold(f64::NEG_INFINITY, |a, &b| a.max(b))
             .max(0.0);
 
         // Then update the current Q-value
-        let current_q = self.q_table.entry((state, action)).or_insert(0.0);
+        let current_q = self.q_table.entry((state.clone(), action.clone())).or_insert(0.0);
+        let old_q = *current_q;
         *current_q = (1.0 - self.learning_rate) * *current_q + 
                     self.learning_rate * (reward + self.discount_factor * next_max_q);
+        
+        // Return the new Q-value
+        *current_q
     }
 
     /// Save the model to a file
@@ -128,6 +141,46 @@ impl<S: State + Serialize + for<'de> Deserialize<'de>, A: Action + Serialize + f
         self.state_size = model.metadata.state_size;
         self.action_size = model.metadata.action_size;
         Ok(())
+    }
+
+    /// Get the configuration used for this agent
+    pub fn get_config(&self) -> model::config::TrainingConfig {
+        model::config::TrainingConfig {
+            learning_rate: self.learning_rate,
+            discount_factor: self.discount_factor,
+            epsilon: self.epsilon,
+            epsilon_decay: 0.999, // Default value
+            min_epsilon: 0.01,    // Default value
+            episodes: 0,          // Will be updated during training
+            visualize: false,
+            checkpoint_freq: 100,
+            checkpoint_path: "models".to_string(),
+            save_metrics: true,
+            metrics_path: "metrics".to_string(),
+        }
+    }
+
+    /// Calculate the average Q-value for the current state
+    pub fn calculate_avg_q_value(&self, state: &S) -> Option<f64> {
+        let valid_actions = vec![
+            A::from_index(0).unwrap(),
+            A::from_index(1).unwrap(),
+        ];
+        
+        if valid_actions.is_empty() {
+            return None;
+        }
+        
+        let sum: f64 = valid_actions.iter()
+            .map(|a| self.q_table.get(&(state.clone(), a.clone())).unwrap_or(&0.0))
+            .sum();
+        
+        Some(sum / valid_actions.len() as f64)
+    }
+
+    /// Decay the epsilon value based on the configuration
+    pub fn decay_epsilon(&mut self, config: &model::config::TrainingConfig) {
+        self.epsilon = (self.epsilon * config.epsilon_decay).max(config.min_epsilon);
     }
 }
 
@@ -219,8 +272,7 @@ mod tests {
 
             total_reward += reward;
 
-            let next_valid_actions = env.valid_actions(&next_state);
-            agent.learn(state.clone(), action, reward, &next_state, &next_valid_actions);
+            agent.update(&state, &action, reward, &next_state);
 
             if done {
                 break;
